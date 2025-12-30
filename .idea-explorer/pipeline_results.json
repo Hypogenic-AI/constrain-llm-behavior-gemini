@@ -13,14 +13,7 @@
       },
       "log_file": "/data/hypogenicai/workspaces/constrain-llm-behavior-gemini/logs/resource_finder_gemini.log",
       "transcript_file": "/data/hypogenicai/workspaces/constrain-llm-behavior-gemini/logs/resource_finder_gemini_transcript.jsonl",
-      "elapsed_time": 2087.7894411087036
-    },
-    "experiment_runner": {
-      "success": false,
-      "return_code": 1,
-      "elapsed_time": 244.7099165916443,
-      "log_file": "/data/hypogenicai/workspaces/constrain-llm-behavior-gemini/logs/execution_gemini.log",
-      "transcript_file": "/data/hypogenicai/workspaces/constrain-llm-behavior-gemini/logs/execution_gemini_transcript.jsonl"
+      "elapsed_time": 51.71368718147278
     }
   },
   "work_dir": "/data/hypogenicai/workspaces/constrain-llm-behavior-gemini"

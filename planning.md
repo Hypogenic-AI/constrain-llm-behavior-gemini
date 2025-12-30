@@ -1,60 +1,60 @@
 # Research Plan: Constraining LLM Behavior via Consistency-Based Abstention
 
-## 1. Research Question
-Can consistency-based abstention mechanisms effectively enable Large Language Models (LLMs) to identify their own knowledge boundaries and abstain from answering unanswerable questions, thereby reducing hallucinations?
+## Research Question
+Can Large Language Models (LLMs) effectively reduce hallucination rates by using consistency-based abstention mechanisms to identify and refuse to answer questions they are uncertain about?
 
-## 2. Background and Motivation
-LLMs are prone to hallucinations, confidently answering questions they don't know the answer to. For safe deployment, models must be able to say "I don't know". Prior work (SelfCheckGPT, Conformal Abstention) suggests that "consistency" (agreement among multiple sampled outputs) is a strong signal for correctness. If a model hallucinates, its answers across samples tend to diverge. If it knows the answer, they converge. We aim to validate this hypothesis on SQuAD 2.0 (which contains explicit unanswerable questions).
+## Background and Motivation
+LLMs are prone to "hallucinations"—generating confident but incorrect answers. This is critical in high-stakes domains (legal, medical). While humans can say "I don't know," LLMs are trained to generate text. Recent research (SelfCheckGPT, Conformal Abstention) suggests that "consistency" (agreement among multiple sampled outputs) is a strong proxy for correctness. This project aims to validate this hypothesis using state-of-the-art models via API.
 
-## 3. Hypothesis Decomposition
-- **H1**: Correct answers have higher self-consistency scores than hallucinations.
-- **H2**: Setting a threshold on consistency score allows the model to selectively abstain, improving the accuracy of the *answered* questions.
-- **H3**: There is a trade-off between coverage (answering more questions) and accuracy, which can be tuned via the threshold.
+## Hypothesis Decomposition
+1.  **H1 (Consistency-Accuracy Correlation)**: There is a positive correlation between the consistency of multiple stochastic samples and the correctness of the greedy generation.
+2.  **H2 (Abstention Efficacy)**: By thresholding on consistency scores, we can improve the accuracy of the *answered* set (Selective Accuracy) at the cost of coverage.
+3.  **H3 (Unanswerable Detection)**: Consistency scores are significantly lower for "unanswerable" questions (from SQuAD 2.0) compared to answerable ones.
 
-## 4. Proposed Methodology
+## Proposed Methodology
 
 ### Approach
-We will use **consistency-based abstention**.
-1.  Given a question $x$.
-2.  Generate a greedy answer $y_{greedy}$.
-3.  Generate $k$ stochastic samples $y_1, ..., y_k$.
-4.  Calculate a **consistency score** $S(y_{greedy}, \{y_i\})$ measuring how similar the samples are to the greedy answer.
-5.  If $S < T$ (threshold), abstain.
+We will implement **Consistency-Based Abstention** (similar to SelfCheckGPT). We will use SQuAD 2.0, which contains both answerable and unanswerable questions, providing a perfect testbed for abstention.
 
 ### Experimental Steps
-1.  **Setup**: Prepare SQuAD 2.0 dataset (already downloaded).
-2.  **Baseline**: Standard Greedy Decoding (always answer).
-3.  **Experiment**: Run consistency checks with $k=3$ (or more if feasible).
-4.  **Analysis**:
-    - Compute distributions of consistency scores for "Answerable" vs "Unanswerable" questions.
-    - Plot Risk-Coverage curve.
-    - Calculate Accuracy on Answered set at different thresholds.
+1.  **Setup**: Prepare environment and load SQuAD 2.0 dataset (already in `datasets/`).
+2.  **Inference**: For each question in the test set (N=100-200):
+    *   Generate 1 **Greedy Answer**.
+    *   Generate $k=3$ **Stochastic Samples** (Temp=0.7).
+3.  **Scoring**: Calculate **Consistency Score** between the greedy answer and stochastic samples using simple Bag-of-Words (Jaccard) or N-gram overlap.
+4.  **Thresholding**: Apply varying thresholds to the consistency score. If score < $T$, output "I don't know".
+5.  **Evaluation**: Compute Risk-Coverage curves.
 
 ### Baselines
-- **Greedy Decoding**: The standard behavior (coverage = 100%, risk = baseline error rate).
-- **Random Abstention** (Theoretical baseline for comparison).
+1.  **Naive Strategy**: Always answer (Standard LLM behavior).
+2.  **Verbalized Confidence**: (If time permits) Prompt model to output confidence 0-1.
 
 ### Evaluation Metrics
-- **Abstention Rate**: % of questions declined.
-- **Accuracy (Answered)**: Accuracy on the subset of non-abstained questions.
-- **AUC-RC (Area Under Risk-Coverage)**: A holistic metric for the trade-off.
+1.  **Risk (Error Rate)**: % of *answered* questions that are wrong.
+2.  **Coverage**: % of questions answered (not abstained).
+3.  **AURC (Area Under Risk-Coverage)**: Integrated metric for trade-off.
+4.  **Abstention Accuracy**: % of "unanswerable" questions correctly abstained.
 
 ### Statistical Analysis Plan
-- T-test to compare consistency scores of correct vs. incorrect answers.
-- Bootstrap confidence intervals for the AUC-RC.
+*   **t-test**: Compare mean consistency scores of Correct vs. Incorrect answers.
+*   **Risk-Coverage Curve**: Plot Error Rate vs. Coverage.
 
-## 5. Expected Outcomes
-- We expect "Unanswerable" questions (from SQuAD 2.0) to have lower consistency scores because the model will hallucinate different random answers or struggle to find a span.
-- By filtering low-consistency answers, the accuracy of the remaining answers should increase.
+## Expected Outcomes
+*   We expect consistency scores to be lower for hallucinations and unanswerable questions.
+*   Abstention should reduce the error rate on the remaining questions.
 
-## 6. Timeline
-- **Phase 1 (Planning)**: Completed.
-- **Phase 2 (Setup)**: Environment and Data verification (10 min).
-- **Phase 3 (Implementation)**: Refine `experiment_runner.py` if needed (20 min).
-- **Phase 4 (Experiments)**: Run evaluation on SQuAD 2.0 (sample size ~100-200 for speed) (30 min).
-- **Phase 5 (Analysis)**: Analyze results and plot curves (20 min).
-- **Phase 6 (Reporting)**: Write `REPORT.md` (20 min).
+## Timeline
+*   **Phase 1 (Planning)**: Completed.
+*   **Phase 2 (Setup)**: 10 min. Install `openai`, `datasets`, etc.
+*   **Phase 3 (Implementation)**: 45 min. Adapt `experiment_runner.py` to use OpenRouter API.
+*   **Phase 4 (Experiments)**: 45 min. Run on SQuAD 2.0 (N=100).
+*   **Phase 5 (Analysis)**: 30 min. Plot curves, calculate metrics.
+*   **Phase 6 (Documentation)**: 30 min. Write REPORT.md.
 
-## 7. Potential Challenges
-- **Compute**: Generating multiple samples ($k$) multiplies inference time. We will use small sample sizes ($N=100$) and a small model (`gpt2` or `distilgpt2`) to ensure feasibility within the session.
-- **Metric**: The "consistency" metric (token overlap) might be too simple. We might need NLI-based consistency if simple overlap fails, but we will start with overlap (n-gram) as implemented.
+## Potential Challenges
+*   **API Cost/Rate Limits**: We will limit N to 100-200 samples to stay within budget.
+*   **Latency**: Sequential API calls can be slow. We will use parallelization if possible, or just wait.
+
+## Success Criteria
+*   Successfully running the pipeline on real API.
+*   Generating a Risk-Coverage plot showing a trade-off (decreasing error as coverage decreases).

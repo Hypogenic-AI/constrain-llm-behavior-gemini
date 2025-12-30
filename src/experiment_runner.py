@@ -1,129 +1,127 @@
 import os
-import torch
 import json
 import argparse
+import time
 import numpy as np
 from tqdm import tqdm
-from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_from_disk, load_dataset
+from openai import OpenAI
 from scoring_utils import calculate_inconsistency_score
+from dotenv import load_dotenv
 
-# Note: We use a simplified token-overlap inconsistency metric (implemented in scoring_utils.py)
-# This is conceptually similar to SelfCheckGPT-Ngram (n=1) but avoids heavy dependencies.
+load_dotenv()
 
-def load_resources(model_name, dataset_path, device):
-    print(f"Loading model: {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        
-    model.to(device)
-    
-    print(f"Loading dataset from {dataset_path}")
-    dataset = load_from_disk(dataset_path)
-    return model, tokenizer, dataset
+# Initialize Client (OpenRouter)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY"),
+)
 
-def generate_answer(model, tokenizer, prompt, device, do_sample=False, num_return_sequences=1):
-    inputs = tokenizer(prompt, return_tensors="pt", max_length=1024, truncation=True).to(device)
-    
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, 
-            max_new_tokens=20, 
-            do_sample=do_sample,
-            temperature=1.0 if do_sample else None,
-            num_return_sequences=num_return_sequences,
-            pad_token_id=tokenizer.pad_token_id
-        )
-    
-    decoded = []
-    for i in range(num_return_sequences):
-        text = tokenizer.decode(outputs[i][inputs['input_ids'].shape[1]:], skip_special_tokens=True).strip()
-        decoded.append(text)
-        
-    return decoded
+def get_response(model, messages, temperature=0.0, max_tokens=100, n=1):
+    """
+    Get response from API with retries.
+    """
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                n=n
+            )
+            return [choice.message.content for choice in response.choices]
+        except Exception as e:
+            print(f"API Error (Attempt {attempt+1}/{retries}): {e}")
+            time.sleep(2 * (attempt + 1))
+    return [""] * n
 
 def run_experiment(args):
-    print("Starting experiment with args:", args)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    print(f"Starting experiment with model: {args.model_name}")
     
-    model, tokenizer, dataset = load_resources(args.model_name, args.dataset_path, device)
-    
-    # Filter dataset
-    eval_data = dataset['validation'].select(range(args.num_samples))
+    # Load Dataset
+    # Try loading from local disk first, else download
+    try:
+        if os.path.exists(args.dataset_path):
+            print(f"Loading local dataset from {args.dataset_path}")
+            dataset = load_from_disk(args.dataset_path)
+        else:
+            print("Local dataset not found, loading from HuggingFace...")
+            dataset = load_dataset("squad_v2")
+    except Exception as e:
+        print(f"Error loading dataset: {e}")
+        return
+
+    # Select validation set
+    eval_data = dataset['validation']
+    if args.num_samples > 0:
+        eval_data = eval_data.select(range(args.num_samples))
     
     results = []
     
-    for i, example in enumerate(tqdm(eval_data, desc="Evaluating")):
+    print(f"Evaluating {len(eval_data)} samples...")
+    
+    for i, example in enumerate(tqdm(eval_data)):
         question = example['question']
         context = example['context']
-        is_impossible = example['answers']['answer_start'] == []
+        is_impossible = len(example['answers']['answer_start']) == 0
         
-        prompt = f"Context: {context}\nQuestion: {question}\nAnswer:"
+        # Construct Prompt
+        # We ask the model to answer the question based on the context.
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant. Read the context and answer the question. If the question cannot be answered from the context, answer very briefly with your best guess or what you think is true, but do not say 'I don't know' yet."},
+            {"role": "user", "content": f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"}
+        ]
         
-        # 1. Greedy
-        greedy_responses = generate_answer(model, tokenizer, prompt, device, do_sample=False)
-        answer_greedy = greedy_responses[0]
+        # 1. Greedy Generation (Temp=0)
+        greedy_responses = get_response(args.model_name, messages, temperature=0.0, n=1)
+        greedy_ans = greedy_responses[0]
         
-        # 2. Sampling
-        sampled_answers = generate_answer(model, tokenizer, prompt, device, do_sample=True, num_return_sequences=args.num_generations)
+        # 2. Stochastic Sampling (Temp=0.7)
+        # We need N samples. Some APIs don't support n>1 efficiently or at all on some models.
+        # We will loop if necessary, but OpenRouter usually supports n.
+        # To be safe and generic with OpenRouter models (some ignore n), we loop.
+        sampled_ans = []
+        for _ in range(args.num_generations):
+             resp = get_response(args.model_name, messages, temperature=0.7, n=1)
+             sampled_ans.append(resp[0])
+             
+        # 3. Calculate Consistency Score
+        score = calculate_inconsistency_score(greedy_ans, sampled_ans)
         
-        # 3. Score
-        score = calculate_inconsistency_score(answer_greedy, sampled_answers)
-        
-        # 4. Abstain Decision
-        abstain = score > args.threshold
-        final_response = "I don't know" if abstain else answer_greedy
+        # 4. Abstain Decision (Post-hoc)
+        # We don't decide here, we save the score to analyze trade-offs later.
         
         results.append({
+            "id": example['id'],
             "question": question,
             "is_impossible": is_impossible,
-            "generated_answer": answer_greedy,
-            "sampled_answers": sampled_answers,
+            "greedy_answer": greedy_ans,
+            "sampled_answers": sampled_ans,
             "consistency_score": score,
-            "abstain": abstain,
-            "final_response": final_response
+            "gold_answers": example['answers']['text'] if not is_impossible else []
         })
         
-    # Metrics
-    total = len(results)
-    abstain_count = sum(1 for r in results if r['abstain'])
-    
-    correct_abstentions = sum(1 for r in results if r['abstain'] and r['is_impossible'])
-    impossible_count = sum(1 for r in results if r['is_impossible'])
-    
-    false_abstentions = sum(1 for r in results if r['abstain'] and not r['is_impossible'])
-    answerable_count = sum(1 for r in results if not r['is_impossible'])
-    
-    print("-" * 30)
-    print("RESULTS Summary")
-    print(f"Total Examples: {total}")
-    print(f"Threshold: {args.threshold}")
-    print(f"Total Abstained: {abstain_count} ({abstain_count/total:.2%})")
-    print("-" * 30)
-    print(f"Impossible Questions: {impossible_count}")
-    print(f"  - Correctly Abstained: {correct_abstentions} ({correct_abstentions/impossible_count if impossible_count else 0:.2%})")
-    print("-" * 30)
-    print(f"Answerable Questions: {answerable_count}")
-    print(f"  - Incorrectly Abstained (False Positive): {false_abstentions} ({false_abstentions/answerable_count if answerable_count else 0:.2%})")
-    
+        # Save intermediate
+        if (i + 1) % 10 == 0:
+            with open(f"results/{args.output_file}", "w") as f:
+                json.dump(results, f, indent=2)
+
+    # Final Save
     os.makedirs("results", exist_ok=True)
     output_path = f"results/{args.output_file}"
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"Results saved to {output_path}")
+    print(f"Saved results to {output_path}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LLM Abstention Experiment")
-    parser.add_argument("--model_name", type=str, default="gpt2-medium", help="Model to use")
-    parser.add_argument("--dataset_path", type=str, default="datasets/squad_v2", help="Path to dataset")
-    parser.add_argument("--num_samples", type=int, default=100, help="Number of examples to evaluate")
-    parser.add_argument("--num_generations", type=int, default=3, help="Number of stochastic samples")
-    parser.add_argument("--threshold", type=float, default=0.5, help="Abstention threshold (Score > T -> Abstain)")
-    parser.add_argument("--output_file", type=str, default="experiment_results.json", help="Output filename")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="meta-llama/llama-3-8b-instruct", help="OpenRouter model ID")
+    parser.add_argument("--dataset_path", type=str, default="datasets/squad_v2", help="Path to local dataset")
+    parser.add_argument("--num_samples", type=int, default=50, help="Number of samples to run")
+    parser.add_argument("--num_generations", type=int, default=3, help="Number of samples for consistency")
+    parser.add_argument("--output_file", type=str, default="experiment_results.json")
     
     args = parser.parse_args()
     run_experiment(args)
